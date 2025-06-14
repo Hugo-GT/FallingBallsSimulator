@@ -1,190 +1,137 @@
+#define _XOPEN_SOURCE 700
 #include <iostream>
-#include <vector>
-#include <chrono>
-#include <thread>
 #include <termios.h>
+#include <linux/termios.h>
+#include <vector>
+#include <thread>
+#include <chrono>
+#include <cstdio>
+#include <cctype>
+#include <sys/types.h>
 #include <unistd.h>
-#include <fcntl.h>
+#include <sys/select.h>
+#ifndef STDIN_FILENO
+#define STDIN_FILENO 0
+#endif
 
-using namespace std;
-using namespace std::chrono;
+class Game {
+private:
+    static const int LANE_SIZE = 5;
+    static const int NUM_LANES = 2;
+    std::vector<std::vector<char>> lanes[NUM_LANES];
+    int currentLane;
+    int currentRow;
+    int currentCol;
+    bool gameRunning;
 
-const int SCREEN_HEIGHT = 20;
-const int LEFT_PATH_DURATION = 6;
-const int RIGHT_PATH_DURATION = 7;
-const int PATH_TOP_Y = 1;
-const int PATH_BOTTOM_Y = SCREEN_HEIGHT - 2;
-const char BALL_CHAR = 'O';
-const char EMPTY_CHAR = ' ';
-const char WALL_CHAR = '|';
-
-enum Lane { LEFT, RIGHT };
-
-struct Ball {
-    Lane lane;
-    time_point<steady_clock> start_time;
-    int duration;
-    bool caught = false;
-};
-
-vector<Ball> balls;
-char hold_key = '\0';  // 'A' or 'L'
-bool ready_to_reset = false;
-Lane caught_lane;
-
-void setNonBlocking(bool enable) {
-    static bool configured = false;
-    static struct termios oldt;
-    struct termios newt;
-    if (enable && !configured) {
+    // Helper function to get a keypress with timeout (in milliseconds)
+    char getKeyWithTimeout(int timeout_ms) {
+        struct termios oldt, newt;
         tcgetattr(STDIN_FILENO, &oldt);
         newt = oldt;
         newt.c_lflag &= ~(ICANON | ECHO);
         tcsetattr(STDIN_FILENO, TCSANOW, &newt);
-        fcntl(STDIN_FILENO, F_SETFL, O_NONBLOCK);
-        configured = true;
-    } else if (!enable && configured) {
+
+        fd_set set;
+        struct timeval timeout;
+        FD_ZERO(&set);
+        FD_SET(STDIN_FILENO, &set);
+        timeout.tv_sec = timeout_ms / 1000;
+        timeout.tv_usec = (timeout_ms % 1000) * 1000;
+
+        char ch = 0;
+        int rv = select(STDIN_FILENO + 1, &set, NULL, NULL, &timeout);
+        if (rv > 0) {
+            read(STDIN_FILENO, &ch, 1);
+        }
+
         tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
-        configured = false;
-    }
-}
-
-int getBallY(const Ball& b) {
-    auto now = steady_clock::now();
-    float progress = duration_cast<milliseconds>(now - b.start_time).count() / 1000.0 / b.duration;
-    return PATH_TOP_Y + (PATH_BOTTOM_Y - PATH_TOP_Y) * progress;
-}
-
-void drawFrame() {
-    cout << "\033[2J\033[1;1H"; // Clear screen
-
-    // Draw top bar
-    cout << "+----------------- Falling Balls Game -----------------+\n";
-
-    for (int y = 0; y < SCREEN_HEIGHT; ++y) {
-        cout << WALL_CHAR;
-        // Draw left path
-        if (y == 0 || y == SCREEN_HEIGHT - 1) {
-            cout << string(10, '-');
-        } else {
-            bool ball_drawn = false;
-            for (const auto& b : balls) {
-                if (b.lane == LEFT && !b.caught && getBallY(b) == y) {
-                    cout << ' ' << BALL_CHAR << string(8, ' ');
-                    ball_drawn = true;
-                    break;
-                }
-            }
-            if (!ball_drawn) cout << string(10, ' ');
-        }
-
-        cout << WALL_CHAR;
-
-        // Draw right path
-        if (y == 0 || y == SCREEN_HEIGHT - 1) {
-            cout << string(10, '-');
-        } else {
-            bool ball_drawn = false;
-            for (const auto& b : balls) {
-                if (b.lane == RIGHT && !b.caught && getBallY(b) == y) {
-                    cout << ' ' << BALL_CHAR << string(8, ' ');
-                    ball_drawn = true;
-                    break;
-                }
-            }
-            if (!ball_drawn) cout << string(10, ' ');
-        }
-
-        cout << WALL_CHAR;
-
-        // Draw catch indicators
-        if (y == PATH_BOTTOM_Y) {
-            if (hold_key == 'A') cout << "  [CATCHING]";
-            else if (hold_key == 'L') cout << "         [CATCHING]";
-        }
-
-        cout << '\n';
+        return ch;
     }
 
-    cout << "+--------------------------------------------+\n";
-    if (ready_to_reset)
-        cout << "Ball caught! Press [H] to reset it to the top.\n";
-    else
-        cout << "Hold [A] or [L] to catch, [H] to reset caught ball.\n";
-}
+public:
+    Game() : currentLane(0), currentRow(0), currentCol(0), gameRunning(true) {
+        // Initialize both lanes
+        for (int lane = 0; lane < NUM_LANES; lane++) {
+            lanes[lane] = std::vector<std::vector<char>>(LANE_SIZE, 
+                std::vector<char>(LANE_SIZE, '.'));
+        }
+    }
 
-void updateBalls() {
-    auto now = steady_clock::now();
-    for (auto& b : balls) {
-        if (b.caught) continue;
-        int y = getBallY(b);
-        if (y >= PATH_BOTTOM_Y) {
-            if ((hold_key == 'A' && b.lane == LEFT) || (hold_key == 'L' && b.lane == RIGHT)) {
-                b.caught = true;
-                caught_lane = b.lane;
-                ready_to_reset = true;
+    void clearScreen() {
+        // ANSI escape sequence to clear screen
+        std::cout << "\033[2J\033[1;1H";
+    }
+
+    void display() {
+        clearScreen();
+        std::cout << "Falling Balls Game\n\n";
+        
+        // Display both lanes side by side
+        for (int row = 0; row < LANE_SIZE; row++) {
+            // Left lane
+            std::cout << "|";
+            for (int col = 0; col < LANE_SIZE; col++) {
+                std::cout << lanes[0][row][col];
+            }
+            std::cout << "|  ";
+            
+            // Right lane
+            std::cout << "|";
+            for (int col = 0; col < LANE_SIZE; col++) {
+                std::cout << lanes[1][row][col];
+            }
+            std::cout << "|\n";
+        }
+        std::cout << "\n";
+    }
+
+    void update() {
+        // Clear previous position
+        lanes[currentLane][currentRow][currentCol] = '.';
+        
+        // Update position
+        currentCol++;
+        if (currentCol >= LANE_SIZE) {
+            currentCol = 0;
+            currentRow++;
+            if (currentRow >= LANE_SIZE) {
+                currentRow = 0;
+                currentLane = (currentLane + 1) % NUM_LANES;
+            }
+        }
+        
+        // Set new position
+        lanes[currentLane][currentRow][currentCol] = 'O';
+    }
+
+    void run() {
+        while (gameRunning) {
+            display();
+            // Check if the ball is at the last cell of a lane
+            if (currentRow == LANE_SIZE - 1 && currentCol == LANE_SIZE - 1) {
+                std::cout << "Catch the ball! Press 'A' for left lane or 'L' for right lane!\n";
+                char expected = (currentLane == 0) ? 'A' : 'L';
+                char input = getKeyWithTimeout((currentLane == 0) ? 240 : 280);
+                if (toupper(input) != expected) {
+                    std::cout << "Game Over! You missed the ball.\n";
+                    gameRunning = false;
+                    break;
+                }
             } else {
-                cout << "\nGAME OVER! You missed a ball.\n";
-                setNonBlocking(false);
-                exit(0);
-            }
-        }
-    }
-}
-
-void handleInput() {
-    char ch;
-    while (read(STDIN_FILENO, &ch, 1) > 0) {
-        if (ch == 'A' || ch == 'a') hold_key = 'A';
-        else if (ch == 'L' || ch == 'l') hold_key = 'L';
-        else if (ch == 'H' || ch == 'h') {
-            if (ready_to_reset) {
-                for (auto& b : balls) {
-                    if (b.caught && b.lane == caught_lane) {
-                        b.start_time = steady_clock::now();
-                        b.caught = false;
-                        ready_to_reset = false;
-                        hold_key = '\0';
-                        break;
-                    }
+                if (currentLane == 0) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(240));
+                } else {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(280));
                 }
             }
+            update();
         }
     }
-}
-
-void spawnBall(Lane lane) {
-    balls.push_back(Ball{
-        .lane = lane,
-        .start_time = steady_clock::now(),
-        .duration = (lane == LEFT) ? LEFT_PATH_DURATION : RIGHT_PATH_DURATION
-    });
-}
+};
 
 int main() {
-    setNonBlocking(true);
-    auto last_spawn_left = steady_clock::now();
-    auto last_spawn_right = steady_clock::now();
-
-    while (true) {
-        auto now = steady_clock::now();
-
-        // Spawn new balls periodically
-        if (duration_cast<seconds>(now - last_spawn_left).count() >= 3) {
-            spawnBall(LEFT);
-            last_spawn_left = now;
-        }
-        if (duration_cast<seconds>(now - last_spawn_right).count() >= 4) {
-            spawnBall(RIGHT);
-            last_spawn_right = now;
-        }
-
-        handleInput();
-        updateBalls();
-        drawFrame();
-        this_thread::sleep_for(chrono::milliseconds(100));
-    }
-
-    setNonBlocking(false);
+    Game game;
+    game.run();
     return 0;
-}
+} 
