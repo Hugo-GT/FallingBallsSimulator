@@ -1,1 +1,1 @@
-g++ -o ballgame main.cpp
+g++ -o ballgame FallingBallGame.cpp
