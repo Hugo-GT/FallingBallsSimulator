@@ -1,7 +1,10 @@
 #!/bin/bash
 
-# Create build directory if it doesn't exist
-mkdir -p build
+# Remove build directory if it exists
+rm -rf build
+
+# Create build directory
+mkdir build
 
 # Navigate to build directory
 cd build

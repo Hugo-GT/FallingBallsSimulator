@@ -1,18 +1,10 @@
-#define _XOPEN_SOURCE 700
 #include <iostream>
-#include <termios.h>
-#include <linux/termios.h>
 #include <vector>
 #include <thread>
 #include <chrono>
-#include <cstdio>
-#include <cctype>
-#include <sys/types.h>
+#include <termios.h>
+#include <fcntl.h>
 #include <unistd.h>
-#include <sys/select.h>
-#ifndef STDIN_FILENO
-#define STDIN_FILENO 0
-#endif
 
 class Game {
 private:
@@ -23,39 +15,49 @@ private:
     int currentRow;
     int currentCol;
     bool gameRunning;
+    struct termios old_tio, new_tio;
 
-    // Helper function to get a keypress with timeout (in milliseconds)
-    char getKeyWithTimeout(int timeout_ms) {
-        struct termios oldt, newt;
-        tcgetattr(STDIN_FILENO, &oldt);
-        newt = oldt;
-        newt.c_lflag &= ~(ICANON | ECHO);
-        tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+    void setupTerminal() {
+        // Get the terminal settings
+        tcgetattr(STDIN_FILENO, &old_tio);
+        new_tio = old_tio;
+        
+        // Disable canonical mode and echo
+        new_tio.c_lflag &= ~(ICANON | ECHO);
+        
+        // Set the new settings
+        tcsetattr(STDIN_FILENO, TCSANOW, &new_tio);
+        
+        // Set stdin to non-blocking mode
+        int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
+        fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK);
+    }
 
-        fd_set set;
-        struct timeval timeout;
-        FD_ZERO(&set);
-        FD_SET(STDIN_FILENO, &set);
-        timeout.tv_sec = timeout_ms / 1000;
-        timeout.tv_usec = (timeout_ms % 1000) * 1000;
+    void restoreTerminal() {
+        // Restore the old terminal settings
+        tcsetattr(STDIN_FILENO, TCSANOW, &old_tio);
+    }
 
-        char ch = 0;
-        int rv = select(STDIN_FILENO + 1, &set, NULL, NULL, &timeout);
-        if (rv > 0) {
-            read(STDIN_FILENO, &ch, 1);
+    char getKey() {
+        char key = ' ';
+        if (read(STDIN_FILENO, &key, 1) == 1) {
+            return key;
         }
-
-        tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
-        return ch;
+        return ' ';
     }
 
 public:
     Game() : currentLane(0), currentRow(0), currentCol(0), gameRunning(true) {
+        setupTerminal();
         // Initialize both lanes
         for (int lane = 0; lane < NUM_LANES; lane++) {
             lanes[lane] = std::vector<std::vector<char>>(LANE_SIZE, 
                 std::vector<char>(LANE_SIZE, '.'));
         }
+    }
+
+    ~Game() {
+        restoreTerminal();
     }
 
     void clearScreen() {
@@ -66,6 +68,7 @@ public:
     void display() {
         clearScreen();
         std::cout << "Falling Balls Game\n\n";
+        std::cout << "Press 'A' to catch in left lane, 'L' to catch in right lane\n\n";
         
         // Display both lanes side by side
         for (int row = 0; row < LANE_SIZE; row++) {
@@ -103,29 +106,28 @@ public:
         
         // Set new position
         lanes[currentLane][currentRow][currentCol] = 'O';
+
+        // Check if the ball reaches the bottom
+        if (currentRow == LANE_SIZE - 1 && currentCol == LANE_SIZE - 1) {
+            char key = getKey();
+            
+            if ((currentLane == 0 && key != 'A') || (currentLane == 1 && key != 'L')) {
+                gameRunning = false;
+                std::cout << "\nGame Over! You missed the ball!\n";
+                return;
+            }
+        }
     }
 
     void run() {
         while (gameRunning) {
             display();
-            // Check if the ball is at the last cell of a lane
-            if (currentRow == LANE_SIZE - 1 && currentCol == LANE_SIZE - 1) {
-                std::cout << "Catch the ball! Press 'A' for left lane or 'L' for right lane!\n";
-                char expected = (currentLane == 0) ? 'A' : 'L';
-                char input = getKeyWithTimeout((currentLane == 0) ? 240 : 280);
-                if (toupper(input) != expected) {
-                    std::cout << "Game Over! You missed the ball.\n";
-                    gameRunning = false;
-                    break;
-                }
-            } else {
-                if (currentLane == 0) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(240));
-                } else {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(280));
-                }
-            }
             update();
+            if (currentLane == 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(240)); // 6 seconds for left lane
+            } else {
+                std::this_thread::sleep_for(std::chrono::milliseconds(280)); // 7 seconds for right lane
+            }
         }
     }
 };
