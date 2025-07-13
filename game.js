@@ -19,18 +19,6 @@ class Game {
         this.keys = {};
         this.currentKeyPressed = ''; // To display the currently pressed key
 
-        // Ball properties
-        this.ball = { x: 0, y: 0, radius: 10, color: 'red' };
-        this.ballLane = 'top'; // 'top', 'left', 'right', 'finished'
-        this.ballTimeInLane = 0;
-        // this.laneDuration = 3000; // 3 seconds for each lane segment (now defined per lane)
-
-        // Ball pathing
-        this.nextLane = 'left'; // To alternate between 'left' and 'right'
-
-        // Ball state
-        this.ballState = 'moving'; // 'moving', 'caught'
-
         // Define lane bezier curve points (matching render)
         this.lanePaths = {
             top: {
@@ -55,7 +43,22 @@ class Game {
                 duration: 5000 // 5 seconds
             }
         };
-        
+
+        // Global lane alternation
+        this.globalNextLane = 'left';
+
+        // Ball properties
+        this.balls = [];
+        // Each ball: { x, y, radius, color, lane, timeInLane, state }
+        this.addInitialBall();
+
+        // Ball add timer
+        this.nextBallTime = 30000; // 30 seconds in ms
+        this.ballAddAvailable = false;
+        this.ballAddedThisInterval = false;
+        this.ballAddCountdownActive = false;
+        this.ballAddCountdownTime = 0;
+
         // Initialize game
         this.init();
         
@@ -81,20 +84,25 @@ class Game {
             this.keys[event.key.toLowerCase()] = true;
             this.currentKeyPressed = event.key.toUpperCase(); // Update displayed key
 
-            if (event.key.toLowerCase() === 'h' && !this.running && this.gameOutcome === null) {
+            if (event.key.toLowerCase() === 'w' && !this.running && this.gameOutcome === null) {
                 this.running = true;
                 this.lastTime = performance.now(); // Reset the timer when starting
                 this.elapsedTime = 0;
                 this.gameOutcome = null;
-                this.nextLane = 'left'; // Reset for new game
+                this.addInitialBall();
+                this.nextBallTime = 30000;
+                this.ballAddAvailable = false;
+                this.ballAddedThisInterval = false;
+                this.ballAddCountdownActive = false;
+                this.ballAddCountdownTime = 0;
+            }
 
-                // Reset ball for start
-                this.ballLane = 'top';
-                this.ballTimeInLane = 0;
-                this.ballState = 'moving';
-                const startPoint = this.lanePaths.top.p0;
-                this.ball.x = startPoint.x;
-                this.ball.y = startPoint.y;
+            // Add new ball if allowed
+            if (event.key.toLowerCase() === 'r' && this.ballAddAvailable && !this.ballAddedThisInterval && this.running && this.ballAddCountdownActive) {
+                this.addNewBall();
+                this.ballAddedThisInterval = true;
+                this.ballAddCountdownActive = false;
+                this.ballAddCountdownTime = 0;
             }
         });
 
@@ -108,93 +116,117 @@ class Game {
         if (!this.running) return;
         this.elapsedTime += deltaTime;
 
+        // Ball add timer logic
+        if (this.elapsedTime >= this.nextBallTime) {
+            this.ballAddAvailable = true;
+            if (!this.ballAddCountdownActive) {
+                this.ballAddCountdownActive = true;
+                this.ballAddCountdownTime = 10000; // 10 seconds
+            }
+        }
+
+        // Handle forced add ball countdown
+        if (this.ballAddCountdownActive) {
+            this.ballAddCountdownTime -= deltaTime;
+            if (this.ballAddCountdownTime <= 0) {
+                this.running = false;
+                this.gameOutcome = 'lost';
+                this.ballAddCountdownActive = false;
+            }
+        }
+
         // Handle ball state
-        if (this.ballState === 'moving') {
-            // Update ball position
-            if (this.ballLane === 'top') {
-                this.ballTimeInLane += deltaTime;
-                const t = Math.min(1, this.ballTimeInLane / this.lanePaths.top.duration);
-                const currentPoint = this.getBezierPoint(t, 
-                    this.lanePaths.top.p0,
-                    this.lanePaths.top.p1,
-                    this.lanePaths.top.p2,
-                    this.lanePaths.top.p3
-                );
-                this.ball.x = currentPoint.x;
-                this.ball.y = currentPoint.y;
+        let anyBallMoving = false;
+        for (const ball of this.balls) {
+            if (ball.state === 'moving') {
+                anyBallMoving = true;
+                if (ball.lane === 'top') {
+                    ball.timeInLane += deltaTime;
+                    const t = Math.min(1, ball.timeInLane / this.lanePaths.top.duration);
+                    const currentPoint = this.getBezierPoint(t, 
+                        this.lanePaths.top.p0,
+                        this.lanePaths.top.p1,
+                        this.lanePaths.top.p2,
+                        this.lanePaths.top.p3
+                    );
+                    ball.x = currentPoint.x;
+                    ball.y = currentPoint.y;
 
-                if (t === 1) {
-                    this.ballLane = this.nextLane; // Transition to selected lane
-                    this.ballTimeInLane = 0;
-                    // Ensure ball is exactly at the split point when transitioning
-                    this.ball.x = this.lanePaths[this.nextLane].p0.x;
-                    this.ball.y = this.lanePaths[this.nextLane].p0.y;
+                    if (t === 1) {
+                        ball.lane = this.globalNextLane;
+                        ball.timeInLane = 0;
+                        ball.x = this.lanePaths[this.globalNextLane].p0.x;
+                        ball.y = this.lanePaths[this.globalNextLane].p0.y;
+                        // Alternate global direction
+                        this.globalNextLane = (this.globalNextLane === 'left') ? 'right' : 'left';
+                    }
+                } else if (ball.lane === 'left') {
+                    ball.timeInLane += deltaTime;
+                    const t = Math.min(1, ball.timeInLane / this.lanePaths.left.duration);
+                    const currentPoint = this.getBezierPoint(t,
+                        this.lanePaths.left.p0,
+                        this.lanePaths.left.p1,
+                        this.lanePaths.left.p2,
+                        this.lanePaths.left.p3
+                    );
+                    ball.x = currentPoint.x;
+                    ball.y = currentPoint.y;
 
-                    // Alternate next lane
-                    this.nextLane = (this.nextLane === 'left') ? 'right' : 'left';
-                }
-            } else if (this.ballLane === 'left') {
-                this.ballTimeInLane += deltaTime;
-                const t = Math.min(1, this.ballTimeInLane / this.lanePaths.left.duration);
-                const currentPoint = this.getBezierPoint(t,
-                    this.lanePaths.left.p0,
-                    this.lanePaths.left.p1,
-                    this.lanePaths.left.p2,
-                    this.lanePaths.left.p3
-                );
-                this.ball.x = currentPoint.x;
-                this.ball.y = currentPoint.y;
+                    if (t === 1) {
+                        if (!this.keys['a']) {
+                            this.running = false;
+                            this.gameOutcome = 'lost';
+                        } else {
+                            ball.state = 'caught';
+                            ball.x = currentPoint.x;
+                            ball.y = currentPoint.y;
+                            ball.lane = 'finished';
+                        }
+                    }
+                } else if (ball.lane === 'right') {
+                    ball.timeInLane += deltaTime;
+                    const t = Math.min(1, ball.timeInLane / this.lanePaths.right.duration);
+                    const currentPoint = this.getBezierPoint(t,
+                        this.lanePaths.right.p0,
+                        this.lanePaths.right.p1,
+                        this.lanePaths.right.p2,
+                        this.lanePaths.right.p3
+                    );
+                    ball.x = currentPoint.x;
+                    ball.y = currentPoint.y;
 
-                if (t === 1) {
-                    // Ball reached end of left lane
-                    if (!this.keys['a']) {
-                        this.running = false;
-                        this.gameOutcome = 'lost';
-                    } else {
-                        this.ballState = 'caught'; // Ball caught!
-                        // Keep ball at the end of the left lane
-                        this.ball.x = currentPoint.x;
-                        this.ball.y = currentPoint.y;
-                        this.ballLane = 'finished'; // Mark as finished to prevent further updates
+                    if (t === 1) {
+                        if (!this.keys['d']) {
+                            this.running = false;
+                            this.gameOutcome = 'lost';
+                        } else {
+                            ball.state = 'caught';
+                            ball.x = currentPoint.x;
+                            ball.y = currentPoint.y;
+                            ball.lane = 'finished';
+                        }
                     }
                 }
-            } else if (this.ballLane === 'right') {
-                this.ballTimeInLane += deltaTime;
-                const t = Math.min(1, this.ballTimeInLane / this.lanePaths.right.duration);
-                const currentPoint = this.getBezierPoint(t,
-                    this.lanePaths.right.p0,
-                    this.lanePaths.right.p1,
-                    this.lanePaths.right.p2,
-                    this.lanePaths.right.p3
-                );
-                this.ball.x = currentPoint.x;
-                this.ball.y = currentPoint.y;
-
-                if (t === 1) {
-                    // Ball reached end of right lane
-                    if (!this.keys['a']) {
-                        this.running = false;
-                        this.gameOutcome = 'lost';
-                    } else {
-                        this.ballState = 'caught'; // Ball caught!
-                        // Keep ball at the end of the right lane
-                        this.ball.x = currentPoint.x;
-                        this.ball.y = currentPoint.y;
-                        this.ballLane = 'finished'; // Mark as finished to prevent further updates
-                    }
+            } else if (ball.state === 'caught') {
+                if (this.keys['w']) {
+                    ball.lane = 'top';
+                    ball.timeInLane = 0;
+                    ball.state = 'moving';
+                    const startPoint = this.lanePaths.top.p0;
+                    ball.x = startPoint.x;
+                    ball.y = startPoint.y;
+                    this.keys['w'] = false;
                 }
             }
-        } else if (this.ballState === 'caught') {
-            if (this.keys['h']) {
-                // Drop ball back to start
-                this.ballLane = 'top';
-                this.ballTimeInLane = 0;
-                this.ballState = 'moving';
-                const startPoint = this.lanePaths.top.p0;
-                this.ball.x = startPoint.x;
-                this.ball.y = startPoint.y;
-                this.keys['h'] = false; // Consume the 'h' press to avoid immediate re-catch
-            }
+        }
+
+        // Reset ball add interval if time has passed and a ball was added
+        if (this.ballAddAvailable && this.ballAddedThisInterval) {
+            this.nextBallTime += 30000;
+            this.ballAddAvailable = false;
+            this.ballAddedThisInterval = false;
+            this.ballAddCountdownActive = false;
+            this.ballAddCountdownTime = 0;
         }
     }
     
@@ -210,11 +242,25 @@ class Game {
                 const lostText = 'YOU LOST';
                 const textWidth = this.ctx.measureText(lostText).width;
                 this.ctx.fillText(lostText, (this.canvas.width - textWidth) / 2, this.canvas.height / 2);
+
+                // Show time played
+                this.ctx.font = '28px Arial';
+                const seconds = Math.floor(this.elapsedTime / 1000);
+                const minutes = Math.floor(seconds / 60);
+                const remainingSeconds = seconds % 60;
+                const timeString = `Time: ${minutes.toString().padStart(2, '0')}:${remainingSeconds.toString().padStart(2, '0')}`;
+                const timeWidth = this.ctx.measureText(timeString).width;
+                this.ctx.fillText(timeString, (this.canvas.width - timeWidth) / 2, this.canvas.height / 2 + 50);
+
+                // Show balls count
+                const ballsString = `Balls: ${this.balls.length}`;
+                const ballsWidth = this.ctx.measureText(ballsString).width;
+                this.ctx.fillText(ballsString, (this.canvas.width - ballsWidth) / 2, this.canvas.height / 2 + 90);
             } else {
                 // Draw start screen
                 this.ctx.fillStyle = '#000';
                 this.ctx.font = '40px Arial';
-                const startText = 'PRESS "H" TO START';
+                const startText = 'PRESS "W" TO START';
                 const textWidth = this.ctx.measureText(startText).width;
                 this.ctx.fillText(startText, (this.canvas.width - textWidth) / 2, this.canvas.height / 2);
             }
@@ -230,15 +276,44 @@ class Game {
         const timeString = `${minutes.toString().padStart(2, '0')}:${remainingSeconds.toString().padStart(2, '0')}`;
         this.ctx.fillText(timeString, 10, 30);
 
+        // Draw ball counter under the timer
+        this.ctx.font = '18px Arial';
+        this.ctx.fillText(`Balls: ${this.balls.length}`, 10, 60);
+
         // Draw currently pressed key (left side, below timer)
         this.ctx.fillStyle = '#000';
         this.ctx.font = '20px Arial';
-        this.ctx.fillText(`Key: ${this.currentKeyPressed}`, 10, 60); // Y-position adjusted
+        this.ctx.fillText(`Key: ${this.currentKeyPressed}`, 10, 90); // Y-position adjusted
         
+        // Draw controls under the active key
+        this.ctx.font = '16px Arial';
+        const controls = [
+            'Controls:',
+            'W: Start / Drop Ball',
+            'A: Catch Ball (Left Lane)',
+            'D: Catch Ball (Right Lane)',
+            'R: Add Ball (every 30s)',
+        ];
+        controls.forEach((text, i) => {
+            this.ctx.fillText(text, 10, 115 + i * 22); // 22px spacing below the key
+        });
+
         // Draw "Game Running" (top right)
         const gameRunningText = "Game Running";
         const textWidth = this.ctx.measureText(gameRunningText).width;
         this.ctx.fillText(gameRunningText, this.canvas.width - textWidth - 10, 30);
+
+        // Draw add ball countdown if active
+        if (this.ballAddCountdownActive) {
+            this.ctx.save();
+            this.ctx.fillStyle = 'red';
+            this.ctx.font = '32px Arial';
+            const secondsLeft = Math.ceil(this.ballAddCountdownTime / 1000);
+            const countdownText = `ADD NEW BALL! ${secondsLeft}s`;
+            const cWidth = this.ctx.measureText(countdownText).width;
+            this.ctx.fillText(countdownText, (this.canvas.width - cWidth) / 2, this.canvas.height / 2 - 100);
+            this.ctx.restore();
+        }
 
         // Draw game lanes
         this.ctx.strokeStyle = '#333'; // Dark grey color for lanes
@@ -274,19 +349,21 @@ class Game {
         );
         this.ctx.stroke();
 
-        // Draw the ball
-        if (this.gameOutcome !== 'lost') { // Only draw if game is not lost
-            this.ctx.beginPath();
-            this.ctx.arc(this.ball.x, this.ball.y, this.ball.radius, 0, Math.PI * 2);
-            this.ctx.fillStyle = this.ball.color;
-            this.ctx.fill();
+        // Draw all balls
+        if (this.gameOutcome !== 'lost') {
+            for (const ball of this.balls) {
+                this.ctx.beginPath();
+                this.ctx.arc(ball.x, ball.y, ball.radius, 0, Math.PI * 2);
+                this.ctx.fillStyle = ball.color;
+                this.ctx.fill();
+            }
         }
 
-        // Draw "PRESS 'H' TO DROP" message if ball is caught
-        if (this.ballState === 'caught') {
+        // Draw "PRESS 'H' TO DROP" message if any ball is caught
+        if (this.balls.some(ball => ball.state === 'caught')) {
             this.ctx.fillStyle = 'blue';
             this.ctx.font = '25px Arial';
-            const dropText = 'PRESS "H" TO DROP';
+            const dropText = 'PRESS "W" TO DROP';
             const textWidth = this.ctx.measureText(dropText).width;
             this.ctx.fillText(dropText, (this.canvas.width - textWidth) / 2, this.canvas.height / 2 + 50);
         }
@@ -303,6 +380,26 @@ class Game {
         
         // Continue the loop
         requestAnimationFrame(this.gameLoop.bind(this));
+    }
+
+    addInitialBall() {
+        this.balls = [this.createBall()];
+    }
+
+    createBall() {
+        return {
+            x: this.lanePaths.top.p0.x,
+            y: this.lanePaths.top.p0.y,
+            radius: 10,
+            color: 'red',
+            lane: 'top',
+            timeInLane: 0,
+            state: 'moving', // 'moving', 'caught'
+        };
+    }
+
+    addNewBall() {
+        this.balls.push(this.createBall());
     }
 }
 
